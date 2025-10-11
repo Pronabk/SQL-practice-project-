@@ -1,41 +1,164 @@
-use walmart_sales;
-select * from walmartsales;
--- CREATING CLEANED TABLE
-create table cleaned_walmartdata as 
-select `Invoice ID`, Branch, City, `Customer type`, Gender, `Product line`,
- cast(`Unit price` AS DECIMAL(10,2)) AS Unit_price, Quantity, 
- cast(`Tax 5%` AS DECIMAL(10,2)) AS `Tax_5%`, 
- cast(Total AS DECIMAL(10,2)) AS Total, 
- str_to_date(`Date`, '%d-%m-%Y') as sale_date, 
- monthname(str_to_date(`Date`, '%d-%m-%Y')) as Months, 
- cast(`Time` as time) as sale_time, Payment, 
- cast(Cogs as decimal(10,2)) as Cogs, 
- cast(`gross margin percentage` as decimal(10,2)) as gross_margin_percentage, 
- cast(`gross income` as decimal(10,2)) as gross_income, 
- cast(Rating as decimal(10,2)) as Rating, 
- `Customer ID` FROM walmartsales;
-SELECT * FROM cleaned_walmartdata;
 
 
--- CHEKING FOR NULL VALUES
-select * from cleaned_walmartdata where 
-`Invoice ID` is null or Branch is null or City is null or
- `Unit_price` is null or Quantity is null;
+use project;
+select * from walmartsales_dataset; 
 
--- CHECKING FOR DUPLICATE VALUES IN INVOICE ID
-select `Invoice ID`, count(*) from cleaned_walmartdata
- group by `Invoice ID` HAVING count(*)>1; 
- 
- 
- -- TRIMING TEXT COLUMNS
-update cleaned_walmartdata set
-`Invoice ID`=trim(`Invoice ID`),
-Branch= trim(Branch),
-City= trim(City),
-`Customer type`= trim(`Customer type`),
-Gender= trim(Gender),
-`Product line`= trim(`Product line`),
-Months= trim(Months),
-Payment= trim(Payment);
+------------------------------------------------------------------------------------------
+/* Task 1: Identifying the Top Branch by Sales Growth Rate */
+------------------------------------------------------------------------------------------
 
- 
+
+WITH MonthlySales AS (
+    SELECT Branch, DATE_FORMAT(STR_TO_DATE(Date, '%d-%m-%Y'), '%Y-%m') AS SalesMonth, SUM(Total) AS TotalSales
+    FROM walmartsales_dataset
+    GROUP BY Branch, SalesMonth ),
+SalesWithGrowth AS ( SELECT *, LAG(TotalSales) OVER (PARTITION BY Branch ORDER BY SalesMonth) AS PrevMonthSales,
+        ROUND((TotalSales - LAG(TotalSales) OVER (PARTITION BY Branch ORDER BY SalesMonth)) / 
+        NULLIF(LAG(TotalSales) OVER (PARTITION BY Branch ORDER BY SalesMonth), 0) * 100, 2) AS GrowthRate
+        FROM MonthlySales)
+SELECT Branch, ROUND(AVG(GrowthRate),2) AS `Avg Monthly Growth Rate`
+FROM SalesWithGrowth
+WHERE GrowthRate IS NOT NULL
+GROUP BY Branch
+ORDER BY `Avg Monthly Growth Rate` DESC
+LIMIT 1;
+
+
+------------------------------------------------------------------------------------------
+/* Task 2: Finding the Most Profitable Product Line for Each Branch */
+------------------------------------------------------------------------------------------
+
+WITH ProfitByBranch AS (SELECT Branch, `Product Line`,
+        ROUND(SUM(`Gross Income` - COGS), 2) AS Profit,
+        ROW_NUMBER() OVER (PARTITION BY Branch 
+            ORDER BY SUM(`Gross Income` - COGS) DESC ) AS `Rank`
+    FROM walmartsales_dataset
+    GROUP BY Branch, `Product Line` )
+SELECT Branch, `Product Line`, Profit
+FROM ProfitByBranch
+WHERE `Rank` = 1;
+
+
+
+------------------------------------------------------------------------------------------
+/* Task 3: Analyzing Customer Segmentation Based on Spending*/
+------------------------------------------------------------------------------------------
+
+WITH Customer_Spending AS (SELECT `Customer ID`,ROUND(AVG(Total),2) AS avg_spending
+FROM walmartsales_dataset
+GROUP BY `Customer ID`)
+SELECT`Customer ID`,avg_spending,
+    CASE
+        WHEN avg_spending < 300 THEN 'LOW'
+        WHEN avg_spending BETWEEN 300 AND 340 THEN 'MEDIUM'
+        ELSE 'HIGH'
+	END AS Cust_spending_segment
+FROM Customer_Spending
+ORDER BY `Customer ID`;
+
+------------------------------------------------------------------------------------------
+/* Task 4: Detecting Anomalies in Sales Transactions.*/
+------------------------------------------------------------------------------------------
+
+
+SELECT *,CASE 
+    WHEN Total > (SELECT AVG(Total) + 2 * STDDEV(Total)
+      FROM walmartsales_dataset
+      WHERE `Product Line` = w.`Product Line`) THEN 'High Anomaly'
+	WHEN Total < (SELECT AVG(Total) - 2 * STDDEV(Total)
+      FROM walmartsales_dataset
+      WHERE `Product Line` = w.`Product Line`) THEN 'Low Anomaly'
+    END AS AnomalyStatus
+FROM walmartsales_dataset w
+WHERE Total > (SELECT AVG(Total) + 2 * STDDEV(Total)
+        FROM walmartsales_dataset
+        WHERE `Product Line` = w.`Product Line`)
+   OR Total < (SELECT AVG(Total) - 2 * STDDEV(Total)
+        FROM walmartsales_dataset
+        WHERE `Product Line` = w.`Product Line`);
+
+
+    
+------------------------------------------------------------------------------------------
+/* Task 5: Most Popular Payment Method by City.*/
+------------------------------------------------------------------------------------------
+
+WITH payment_tally AS (SELECT
+    City,Payment,COUNT(Payment) AS transaction_tally,
+    RANK() OVER (PARTITION BY City ORDER BY COUNT(Payment) DESC) AS payment_rank
+FROM walmartsales_dataset
+GROUP BY City, Payment)
+SELECT
+    City,Payment,transaction_tally
+FROM payment_tally
+WHERE payment_rank = 1;
+
+------------------------------------------------------------------------------------------
+/* Task 6: Monthly Sales Distribution by Gender*/
+------------------------------------------------------------------------------------------
+
+SELECT
+    Gender,
+    MONTH(STR_TO_DATE(Date, '%d-%m-%Y')) AS Month,
+    ROUND(SUM(Total)) AS `Total Sales`,
+    ROUND(SUM(Total) / SUM(SUM(Total)) OVER (
+        PARTITION BY MONTH(STR_TO_DATE(Date, '%d-%m-%Y'))
+    ) * 100, 2) AS Percentage
+FROM walmartsales_dataset
+GROUP BY Gender, MONTH(STR_TO_DATE(Date, '%d-%m-%Y'))
+ORDER BY Gender, Month;
+
+
+------------------------------------------------------------------------------------------
+/* Task 7: Best Product Line by Customer Type.*/
+------------------------------------------------------------------------------------------
+
+WITH Customer_preference AS (SELECT `Customer type`,`Product line`,ROUND(SUM(Total)) AS `Total Sales`,
+    RANK() OVER (PARTITION BY `Customer type` ORDER BY SUM(Total) DESC) AS product_rank
+FROM walmartsales_dataset
+GROUP BY `Customer type`, `Product line`)
+SELECT `Customer type`,`Product line`,`Total Sales`
+FROM Customer_preference
+WHERE product_rank = 1;
+
+------------------------------------------------------------------------------------------
+/* Task 8: Identifying Repeat Customers
+Walmart needs to identify customers who made repeat purchases within a specific time frame (e.g., within 30 days).*/
+------------------------------------------------------------------------------------------
+
+SELECT DISTINCT a.`Customer ID`
+FROM walmartsales_dataset a
+JOIN walmartsales_dataset b 
+  ON a.`Customer ID` = b.`Customer ID`
+     AND STR_TO_DATE(b.Date, '%d-%m-%Y') > STR_TO_DATE(a.Date, '%d-%m-%Y')
+     AND DATEDIFF(STR_TO_DATE(b.Date, '%d-%m-%Y'), STR_TO_DATE(a.Date, '%d-%m-%Y')) <= 30;
+
+     
+     
+------------------------------------------------------------------------------------------
+/* Task 9: Finding Top 5 Customers by Sales Volume
+Walmart wants to reward its top 5 customers who have generated the most sales Revenue.*/
+------------------------------------------------------------------------------------------
+
+
+SELECT `Customer ID`, Round(SUM(Total),2) AS Sales_Revenue
+FROM walmartsales_dataset
+GROUP BY `Customer ID`
+ORDER BY Sales_Revenue DESC
+LIMIT 5;
+
+------------------------------------------------------------------------------------------
+/*Task 10: Analyzing Sales Trends by Day of the Week
+Walmart wants to analyze the sales patterns to determine which day of the week brings the highest sales.*/
+------------------------------------------------------------------------------------------
+
+SELECT
+    DAYNAME(STR_TO_DATE(Date, '%d-%m-%Y')) AS day_of_week,
+    ROUND(SUM(Total)) AS total_sales
+FROM walmartsales_dataset
+GROUP BY day_of_week
+ORDER BY total_sales DESC
+LIMIT 1;
+
+
+
